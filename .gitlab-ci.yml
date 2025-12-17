@@ -1,0 +1,94 @@
+stages:
+  - build
+  - package
+  - test
+  - staging
+  - deploy
+
+variables:
+    APP_VERSION: $CI_PIPELINE_IID
+
+build website:
+    image: node:22.16.0-alpine3.22
+    stage: build
+    script:
+        - yarn install
+        - yarn lint
+        - yarn test
+        - yarn build
+        - echo $APP_VERSION > build/version.html
+    artifacts:
+        paths:
+            - build
+
+build docker image:
+    stage: package
+    image: docker:29.1.2
+    services:
+        - docker:29.1.2-dind
+    script:
+        - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+        - docker build -t $CI_REGISTRY_IMAGE -t $CI_REGISTRY_IMAGE:$APP_VERSION .
+        - docker image ls
+        - docker push --all-tags $CI_REGISTRY_IMAGE
+
+test docker image:
+    stage: test
+    image: curlimages/curl:8.17.0
+    services:
+        - name: $CI_REGISTRY_IMAGE:$APP_VERSION
+          alias: react-app
+    script:
+        - curl http://react-app/version.html | grep $APP_VERSION
+
+deploy to staging:
+    stage: staging
+    environment:
+        name: Staging
+        url: http://odhila-15112025-staging.s3-website.eu-north-1.amazonaws.com
+    image: 
+        name: amazon/aws-cli:2.31.37
+        entrypoint: [""]
+    script:
+        - export AWS_ACCESS_KEY_ID=$(echo -n $AWS_ACCESS_KEY_ID)
+        - export AWS_SECRET_ACCESS_KEY=$(echo -n $AWS_SECRET_ACCESS_KEY)
+        - aws s3 sync build s3://$AWS_S3_BUCKET_STAGING --delete
+        - curl $CI_ENVIRONMENT_URL | grep "React App"
+        - curl $CI_ENVIRONMENT_URL/version.html | grep $APP_VERSION
+
+deploy to production:
+    stage: deploy
+    when: manual
+    rules:
+        - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+    image: 
+        name: amazon/aws-cli:2.31.37
+        entrypoint: [""]
+    environment:
+        name: Production 
+        url: http://react-web-app-env.eba-sdg4jmea.eu-north-1.elasticbeanstalk.com/
+    script:
+        - export AWS_ACCESS_KEY_ID=$(echo -n $AWS_ACCESS_KEY_ID)
+        - export AWS_SECRET_ACCESS_KEY=$(echo -n $AWS_SECRET_ACCESS_KEY)
+        - export AWS_S3_BUCKET=$(echo -n $AWS_S3_BUCKET | tr -d '\n') 
+        - export APP_VERSION=$(echo -n $APP_VERSION | tr -d '\n') 
+        - export CI_REGISTRY_IMAGE=$(echo -n $CI_REGISTRY_IMAGE | tr -d '\n') 
+        - yum install -y gettext
+        - export DEPLOY_TOKEN=$(echo -n $GITLAB_DEPLOY_TOKEN | tr -d "\n" | base64) 
+        - envsubst <templates/Dockerrun.aws.json > Dockerrun.aws.json
+        - envsubst <templates/auth.json > auth.json
+        - cat Dockerrun.aws.json
+        - cat auth.json
+        - aws s3 cp auth.json s3://elasticbeanstalk-eu-north-1-016434203486/auth.json 
+        - aws s3 cp Dockerrun.aws.json s3://elasticbeanstalk-eu-north-1-016434203486/Dockerrun.aws.json
+        - aws elasticbeanstalk create-application-version --application-name "react-web-app" --version-label $APP_VERSION --source-bundle "S3Bucket=$AWS_S3_BUCKET,S3Key=Dockerrun.aws.json"
+        - aws elasticbeanstalk update-environment --application-name "react-web-app" --version-label $APP_VERSION --environment-name "React-web-app-env"
+        - aws elasticbeanstalk wait environment-updated --application-name "react-web-app" --version-label $APP_VERSION --environment-name "React-web-app-env"
+        - curl http://react-web-app-env.eba-sdg4jmea.eu-north-1.elasticbeanstalk.com/version.html | grep $APP_VERSION
+
+
+
+
+
+
+
